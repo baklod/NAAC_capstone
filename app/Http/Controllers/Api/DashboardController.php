@@ -1,0 +1,427 @@
+<?php
+
+namespace App\Http\Controllers\Api;
+
+use App\Http\Controllers\Controller;
+use App\Models\Inventory;
+use App\Models\Product;
+use App\Models\Sale;
+use App\Models\User;
+use Carbon\Carbon;
+use Carbon\CarbonPeriod;
+use Illuminate\Http\Request;
+
+class DashboardController extends Controller
+{
+    public function index(Request $request)
+    {
+        [$rangeKey, $startDate, $endDate] = $this->resolveDateRange($request);
+
+        $salesByBranch = $this->buildSalesByBranchSummary($startDate, $endDate);
+        $branchSalesChart = $this->buildBranchSalesChart($startDate, $endDate, $salesByBranch);
+        $monthlyDailyBarChart = $this->buildMonthlyDailyBarChart();
+        $latestSales = $this->buildLatestSales(7);
+        $topSellingProductsPie = $this->buildTopSellingProductsPieChart($startDate, $endDate);
+
+        return response()->json([
+            'data' => [
+                'total_products' => Product::count(),
+                'total_sales' => (float) Sale::sum('total_price'),
+                'total_users' => User::count(),
+                'inventory_count' => (int) Inventory::sum('quantity'),
+                'sales_by_branch' => $salesByBranch,
+                'branch_sales_chart' => [
+                    'range' => $rangeKey,
+                    'date_from' => $startDate->toDateString(),
+                    'date_to' => $endDate->toDateString(),
+                    'labels' => $branchSalesChart['labels'],
+                    'series' => $branchSalesChart['series'],
+                ],
+                'monthly_daily_bar_chart' => [
+                    'date_from' => $monthlyDailyBarChart['date_from'],
+                    'date_to' => $monthlyDailyBarChart['date_to'],
+                    'labels' => $monthlyDailyBarChart['labels'],
+                    'series' => $monthlyDailyBarChart['series'],
+                ],
+                'latest_sales' => $latestSales,
+                'top_selling_products_pie' => [
+                    'labels' => $topSellingProductsPie['labels'],
+                    'series' => $topSellingProductsPie['series'],
+                    'total_quantity' => $topSellingProductsPie['total_quantity'],
+                ],
+            ],
+        ]);
+    }
+
+    private function resolveDateRange(Request $request): array
+    {
+        $selectedRange = (string) $request->query('range', 'this_year');
+
+        $allowedDayRanges = [
+            '30d' => 30,
+            '90d' => 90,
+            '180d' => 180,
+        ];
+
+        if (array_key_exists($selectedRange, $allowedDayRanges)) {
+            $days = $allowedDayRanges[$selectedRange];
+
+            return [
+                $selectedRange,
+                now()->startOfDay()->subDays($days - 1),
+                now()->endOfDay(),
+            ];
+        }
+
+        if ($selectedRange === 'this_year') {
+            return [
+                'this_year',
+                now()->copy()->startOfYear()->startOfDay(),
+                now()->copy()->endOfYear()->endOfDay(),
+            ];
+        }
+
+        if ($selectedRange === 'last_year') {
+            $lastYear = now()->copy()->subYear();
+
+            return [
+                'last_year',
+                $lastYear->copy()->startOfYear()->startOfDay(),
+                $lastYear->copy()->endOfYear()->endOfDay(),
+            ];
+        }
+
+        if ($selectedRange === 'custom') {
+            $dateFromRaw = (string) $request->query('date_from', '');
+            $dateToRaw = (string) $request->query('date_to', '');
+
+            try {
+                $dateFrom = Carbon::createFromFormat('Y-m-d', $dateFromRaw)->startOfDay();
+                $dateTo = Carbon::createFromFormat('Y-m-d', $dateToRaw)->endOfDay();
+
+                if ($dateFrom->greaterThan($dateTo)) {
+                    [$dateFrom, $dateTo] = [$dateTo->copy()->startOfDay(), $dateFrom->copy()->endOfDay()];
+                }
+
+                return ['custom', $dateFrom, $dateTo];
+            } catch (\Throwable $exception) {
+                return [
+                    'this_year',
+                    now()->copy()->startOfYear()->startOfDay(),
+                    now()->copy()->endOfYear()->endOfDay(),
+                ];
+            }
+        }
+
+        return [
+            'this_year',
+            now()->copy()->startOfYear()->startOfDay(),
+            now()->copy()->endOfYear()->endOfDay(),
+        ];
+    }
+
+    private function buildSalesByBranchSummary(Carbon $startDate, Carbon $endDate): array
+    {
+        return Sale::query()
+            ->leftJoin('users', 'sales.processed_by_user_id', '=', 'users.id')
+            ->leftJoin('employees', 'users.employee_id', '=', 'employees.id')
+            ->leftJoin('branches', 'employees.branch_id', '=', 'branches.id')
+            ->whereBetween('sales.created_at', [$startDate, $endDate])
+            ->selectRaw('branches.id as branch_id')
+            ->selectRaw('branches.name as branch_name')
+            ->selectRaw('COUNT(sales.id) as sale_count')
+            ->selectRaw('COALESCE(SUM(sales.total_price), 0) as total_sales')
+            ->groupBy('branches.id', 'branches.name')
+            ->orderByDesc('total_sales')
+            ->get()
+            ->map(function ($row) {
+                return [
+                    'branch_id' => $row->branch_id !== null ? (int) $row->branch_id : null,
+                    'branch_name' => $row->branch_name ?: 'Unassigned',
+                    'sale_count' => (int) $row->sale_count,
+                    'total_sales' => (float) $row->total_sales,
+                ];
+            })
+            ->values()
+            ->all();
+    }
+
+    private function buildBranchSalesChart(Carbon $startDate, Carbon $endDate, array $salesByBranch): array
+    {
+        $selectedBranches = collect($salesByBranch)
+            ->take(5)
+            ->map(function (array $branch) {
+                $key = $branch['branch_id'] !== null
+                    ? 'branch_' . $branch['branch_id']
+                    : 'unassigned';
+
+                return [
+                    'key' => $key,
+                    'branch_id' => $branch['branch_id'],
+                    'branch_name' => $branch['branch_name'],
+                ];
+            })
+            ->values();
+
+        if ($selectedBranches->isEmpty()) {
+            return [
+                'labels' => [],
+                'series' => [],
+            ];
+        }
+
+        $dailyRows = Sale::query()
+            ->leftJoin('users', 'sales.processed_by_user_id', '=', 'users.id')
+            ->leftJoin('employees', 'users.employee_id', '=', 'employees.id')
+            ->leftJoin('branches', 'employees.branch_id', '=', 'branches.id')
+            ->whereBetween('sales.created_at', [$startDate, $endDate])
+            ->selectRaw('DATE(sales.created_at) as sale_date')
+            ->selectRaw('branches.id as branch_id')
+            ->selectRaw('COALESCE(SUM(sales.total_price), 0) as total_sales')
+            ->groupByRaw('DATE(sales.created_at), branches.id')
+            ->orderBy('sale_date')
+            ->get();
+
+        $chartStartDate = $dailyRows->isNotEmpty()
+            ? Carbon::parse((string) $dailyRows->first()->sale_date)->startOfDay()
+            : $startDate->copy()->startOfDay();
+
+        $dates = collect(CarbonPeriod::create(
+            $chartStartDate,
+            '1 day',
+            $endDate->copy()->startOfDay(),
+        ));
+
+        $labels = $dates
+            ->map(fn (Carbon $date) => $date->format('M j'))
+            ->values()
+            ->all();
+
+        $dateIndex = $dates
+            ->mapWithKeys(fn (Carbon $date, int $index) => [$date->format('Y-m-d') => $index])
+            ->all();
+
+        $seriesData = [];
+
+        foreach ($selectedBranches as $branch) {
+            $seriesData[$branch['key']] = array_fill(0, count($labels), 0.0);
+        }
+
+        foreach ($dailyRows as $row) {
+            $key = $row->branch_id !== null
+                ? 'branch_' . (int) $row->branch_id
+                : 'unassigned';
+
+            if (!array_key_exists($key, $seriesData)) {
+                continue;
+            }
+
+            $saleDate = (string) $row->sale_date;
+
+            if (!array_key_exists($saleDate, $dateIndex)) {
+                continue;
+            }
+
+            $index = $dateIndex[$saleDate];
+            $seriesData[$key][$index] = round((float) $row->total_sales, 2);
+        }
+
+        $series = $selectedBranches
+            ->map(function (array $branch) use ($seriesData, $labels) {
+                return [
+                    'name' => $branch['branch_name'],
+                    'data' => $seriesData[$branch['key']] ?? array_fill(0, count($labels), 0.0),
+                ];
+            })
+            ->values()
+            ->all();
+
+        return [
+            'labels' => $labels,
+            'series' => $series,
+        ];
+    }
+
+    private function buildMonthlyDailyBarChart(): array
+    {
+        $monthStart = now()->copy()->startOfMonth()->startOfDay();
+        $monthEnd = now()->copy()->endOfDay();
+
+        $dates = collect(CarbonPeriod::create(
+            $monthStart,
+            '1 day',
+            $monthEnd->copy()->startOfDay(),
+        ));
+
+        $labels = $dates
+            ->map(fn (Carbon $date) => $date->format('M j'))
+            ->values()
+            ->all();
+
+        $dateIndex = $dates
+            ->mapWithKeys(fn (Carbon $date, int $index) => [$date->format('Y-m-d') => $index])
+            ->all();
+
+        $selectedBranches = Sale::query()
+            ->leftJoin('users', 'sales.processed_by_user_id', '=', 'users.id')
+            ->leftJoin('employees', 'users.employee_id', '=', 'employees.id')
+            ->leftJoin('branches', 'employees.branch_id', '=', 'branches.id')
+            ->whereBetween('sales.created_at', [$monthStart, $monthEnd])
+            ->selectRaw('branches.id as branch_id')
+            ->selectRaw('branches.name as branch_name')
+            ->selectRaw('COALESCE(SUM(sales.total_price), 0) as total_sales')
+            ->groupBy('branches.id', 'branches.name')
+            ->orderByDesc('total_sales')
+            ->limit(2)
+            ->get()
+            ->map(function ($row) {
+                $branchId = $row->branch_id !== null ? (int) $row->branch_id : null;
+
+                return [
+                    'key' => $branchId !== null ? 'branch_' . $branchId : 'unassigned',
+                    'branch_id' => $branchId,
+                    'branch_name' => $row->branch_name ?: 'Unassigned',
+                ];
+            })
+            ->values();
+
+        if ($selectedBranches->isEmpty()) {
+            return [
+                'date_from' => $monthStart->toDateString(),
+                'date_to' => $monthEnd->toDateString(),
+                'labels' => $labels,
+                'series' => [],
+            ];
+        }
+
+        $dailyRows = Sale::query()
+            ->leftJoin('users', 'sales.processed_by_user_id', '=', 'users.id')
+            ->leftJoin('employees', 'users.employee_id', '=', 'employees.id')
+            ->leftJoin('branches', 'employees.branch_id', '=', 'branches.id')
+            ->whereBetween('sales.created_at', [$monthStart, $monthEnd])
+            ->selectRaw('DATE(sales.created_at) as sale_date')
+            ->selectRaw('branches.id as branch_id')
+            ->selectRaw('COALESCE(SUM(sales.total_price), 0) as total_sales')
+            ->groupByRaw('DATE(sales.created_at), branches.id')
+            ->orderBy('sale_date')
+            ->get();
+
+        $seriesData = [];
+
+        foreach ($selectedBranches as $branch) {
+            $seriesData[$branch['key']] = array_fill(0, count($labels), 0.0);
+        }
+
+        foreach ($dailyRows as $row) {
+            $key = $row->branch_id !== null
+                ? 'branch_' . (int) $row->branch_id
+                : 'unassigned';
+
+            if (!array_key_exists($key, $seriesData)) {
+                continue;
+            }
+
+            $saleDate = (string) $row->sale_date;
+
+            if (!array_key_exists($saleDate, $dateIndex)) {
+                continue;
+            }
+
+            $index = $dateIndex[$saleDate];
+            $seriesData[$key][$index] = round((float) $row->total_sales, 2);
+        }
+
+        $series = $selectedBranches
+            ->map(function (array $branch) use ($seriesData, $labels) {
+                return [
+                    'name' => $branch['branch_name'],
+                    'data' => $seriesData[$branch['key']] ?? array_fill(0, count($labels), 0.0),
+                ];
+            })
+            ->values()
+            ->all();
+
+        return [
+            'date_from' => $monthStart->toDateString(),
+            'date_to' => $monthEnd->toDateString(),
+            'labels' => $labels,
+            'series' => $series,
+        ];
+    }
+
+    private function buildLatestSales(int $limit = 10): array
+    {
+        return Sale::query()
+            ->with([
+                'product:id,name',
+                'processedBy:id,name,user_name',
+            ])
+            ->latest('created_at')
+            ->limit($limit)
+            ->get()
+            ->map(function (Sale $sale) {
+                $processorName = $sale->processedBy?->name
+                    ?: $sale->processedBy?->user_name
+                    ?: 'Unassigned';
+
+                return [
+                    'id' => (int) $sale->id,
+                    'sale_number' => (string) ($sale->sale_number ?: 'N/A'),
+                    'product_name' => (string) ($sale->product?->name ?: 'Unknown product'),
+                    'quantity' => (int) $sale->quantity,
+                    'total_price' => round((float) $sale->total_price, 2),
+                    'processed_by' => $processorName,
+                    'sold_at' => $sale->created_at?->toDateTimeString(),
+                ];
+            })
+            ->values()
+            ->all();
+    }
+
+    private function buildTopSellingProductsPieChart(Carbon $startDate, Carbon $endDate): array
+    {
+        $rows = Sale::query()
+            ->join('products', 'sales.product_id', '=', 'products.id')
+            ->whereBetween('sales.created_at', [$startDate, $endDate])
+            ->selectRaw('products.id as product_id')
+            ->selectRaw('products.name as product_name')
+            ->selectRaw('COALESCE(SUM(sales.quantity), 0) as total_quantity')
+            ->groupBy('products.id', 'products.name')
+            ->orderByDesc('total_quantity')
+            ->get();
+
+        if ($rows->isEmpty()) {
+            return [
+                'labels' => [],
+                'series' => [],
+                'total_quantity' => 0,
+            ];
+        }
+
+        $topRows = $rows->take(4);
+        $otherQuantity = (int) $rows
+            ->slice(4)
+            ->sum(fn ($row) => (int) $row->total_quantity);
+
+        $labels = $topRows
+            ->map(fn ($row) => (string) ($row->product_name ?: 'Unknown product'))
+            ->values()
+            ->all();
+
+        $series = $topRows
+            ->map(fn ($row) => (int) $row->total_quantity)
+            ->values()
+            ->all();
+
+        if ($otherQuantity > 0) {
+            $labels[] = 'Other';
+            $series[] = $otherQuantity;
+        }
+
+        return [
+            'labels' => $labels,
+            'series' => $series,
+            'total_quantity' => (int) array_sum($series),
+        ];
+    }
+}

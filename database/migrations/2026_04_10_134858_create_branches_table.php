@@ -11,18 +11,21 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::create('products', function (Blueprint $table) {
+        Schema::create('branches', function (Blueprint $table) {
             $table->id();
-            $table->string('branch');
-            $table->string('barcode')->unique();
             $table->string('name');
-            $table->unsignedInteger('quantity')->default(0);
+            $table->string('location');
+            $table->string('manager')->nullable();
+            $table->string('status')->default('active');
             $table->timestamps();
         });
     }
 
+    /**
+     * Reverse the migrations.
+     */
     public function down(): void
     {
-        Schema::dropIfExists('products');
+        Schema::dropIfExists('branches');
     }
 };
