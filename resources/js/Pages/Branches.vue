@@ -21,6 +21,7 @@ import Table from "../components/ui/Table.vue";
 import api from "../services/api";
 
 const branches = ref([]);
+const managerOptions = ref([]);
 const showModal = ref(false);
 const showDeleteModal = ref(false);
 const editingId = ref(null);
@@ -35,14 +36,30 @@ const isSaving = ref(false);
 const form = reactive({
     name: "",
     location: "",
-    manager: "",
+    manager_user_id: "",
     status: "active",
 });
 
 const loadBranches = async () => {
-    const { data } = await api.get("/branches");
-    branches.value = data.data;
+    const [branchesRes, managersRes] = await Promise.all([
+        api.get("/branches"),
+        api.get("/branches/manager-options"),
+    ]);
+    branches.value = branchesRes.data.data;
+    managerOptions.value = managersRes.data.data;
 };
+
+const getManagerLabel = (branch) => {
+    const user = branch.manager_user;
+    if (user) {
+        return user.name || user.user_name || user.email || "-";
+    }
+
+    return branch.manager || "-";
+};
+
+const getManagerOptionLabel = (user) =>
+    [user.name || user.user_name, user.email].filter(Boolean).join(" — ");
 
 const statusOptions = computed(() => {
     const statuses = new Set(
@@ -63,7 +80,7 @@ const filteredBranches = computed(() => {
             const haystack = [
                 branch.name,
                 branch.location,
-                branch.manager,
+                getManagerLabel(branch),
                 branch.status,
             ]
                 .filter(Boolean)
@@ -146,7 +163,7 @@ watch(totalPages, (pages) => {
 const resetForm = () => {
     form.name = "";
     form.location = "";
-    form.manager = "";
+    form.manager_user_id = "";
     form.status = "active";
     editingId.value = null;
 };
@@ -159,7 +176,9 @@ const openCreate = () => {
 const openEdit = (branch) => {
     form.name = branch.name;
     form.location = branch.location;
-    form.manager = branch.manager ?? "";
+    form.manager_user_id = branch.manager_user_id
+        ? String(branch.manager_user_id)
+        : "";
     form.status = (branch.status || "active").toLowerCase();
     editingId.value = branch.id;
     showModal.value = true;
@@ -174,7 +193,9 @@ const saveBranch = async () => {
     const payload = {
         name: form.name.trim(),
         location: form.location.trim(),
-        manager: form.manager.trim() || null,
+        manager_user_id: form.manager_user_id
+            ? Number(form.manager_user_id)
+            : null,
         status: form.status,
     };
 
@@ -308,7 +329,7 @@ onMounted(loadBranches);
                     <tr v-for="branch in paginatedBranches" :key="branch.id">
                         <td>{{ branch.name }}</td>
                         <td>{{ branch.location }}</td>
-                        <td>{{ branch.manager || "-" }}</td>
+                        <td>{{ getManagerLabel(branch) }}</td>
                         <td>
                             <span
                                 class="branches-status-badge"
@@ -416,11 +437,26 @@ onMounted(loadBranches);
                         label="Location"
                         placeholder="e.g. Naga City"
                     />
-                    <Input
-                        v-model="form.manager"
-                        label="Manager"
-                        placeholder="e.g. A. Santos"
-                    />
+                    <label class="form-field">
+                        <span class="form-field__label">Assigned manager</span>
+                        <select v-model="form.manager_user_id" class="input">
+                            <option value="">No manager assigned</option>
+                            <option
+                                v-for="user in managerOptions"
+                                :key="user.id"
+                                :value="String(user.id)"
+                            >
+                                {{ getManagerOptionLabel(user) }}
+                            </option>
+                        </select>
+                    </label>
+                    <p
+                        v-if="managerOptions.length === 0"
+                        class="products-readonly-note"
+                    >
+                        No users with the manager role yet. Create a manager
+                        account under Users first.
+                    </p>
 
                     <label class="form-field">
                         <span class="form-field__label">Status</span>

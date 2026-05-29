@@ -16,6 +16,7 @@ class Sale extends Model
         'unit_type',
         'quantity',
         'total_price',
+        'payment_method',
         'created_at',
         'updated_at',
     ];

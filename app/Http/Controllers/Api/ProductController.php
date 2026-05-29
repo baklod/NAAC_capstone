@@ -4,14 +4,81 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Product;
+use App\Models\User;
+use App\Services\ManagerBranchScope;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 
 class ProductController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        $products = Product::with(['inventory', 'sales'])->latest()->get();
+        $managerBranchIds = ManagerBranchScope::branchIdsFor($request->user());
+
+        if ($managerBranchIds !== null) {
+            if ($managerBranchIds === []) {
+                return response()->json(['data' => []]);
+            }
+
+            $products = Product::query()
+                ->whereHas('inventories', function ($query) use ($managerBranchIds) {
+                    $query->whereIn('branch_id', $managerBranchIds);
+                })
+                ->with([
+                    'inventories' => function ($query) use ($managerBranchIds) {
+                        $query->whereIn('branch_id', $managerBranchIds);
+                        $query->select(['id', 'product_id', 'branch_id', 'quantity'])
+                            ->with('branch:id,name');
+                    },
+                    'sales',
+                ])
+                ->latest()
+                ->get();
+
+            $this->appendBranchQuantities($products);
+
+            return response()->json(['data' => $products]);
+        }
+
+        $branchId = null;
+
+        if ($request->filled('branch_id')) {
+            $branchId = (int) $request->query('branch_id');
+        } elseif ($request->filled('user_id')) {
+            $user = User::with('employee:id,branch_id')->find($request->query('user_id'));
+            $branchId = $user?->employee?->branch_id;
+
+            if ($user && $branchId === null) {
+                return response()->json(['data' => []]);
+            }
+        }
+
+        $productsQuery = Product::query()->with([
+            'inventory',
+            'sales',
+            'inventories' => function ($query) {
+                $query->select(['id', 'product_id', 'branch_id', 'quantity'])
+                    ->with('branch:id,name');
+            },
+        ]);
+
+        if ($branchId) {
+            $productsQuery
+                ->whereHas('inventories', function ($query) use ($branchId) {
+                    $query->where('branch_id', $branchId);
+                })
+                ->with([
+                    'inventories' => function ($query) use ($branchId) {
+                        $query->where('branch_id', $branchId);
+                        $query->select(['id', 'product_id', 'branch_id', 'quantity'])
+                            ->with('branch:id,name');
+                    },
+                ]);
+        }
+
+        $products = $productsQuery->latest()->get();
+
+        $this->appendBranchQuantities($products);
 
         return response()->json(['data' => $products]);
     }
@@ -20,6 +87,7 @@ class ProductController extends Controller
     {
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
+            'category' => ['nullable', 'string', 'max:100'],
             'unit' => ['required', 'string', 'max:50'],
             'price' => ['required', 'numeric', 'min:0'],
             'description' => ['nullable', 'string'],
@@ -45,6 +113,7 @@ class ProductController extends Controller
 
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
+            'category' => ['nullable', 'string', 'max:100'],
             'unit' => ['required', 'string', 'max:50'],
             'price' => ['required', 'numeric', 'min:0'],
             'description' => ['nullable', 'string'],
@@ -77,6 +146,27 @@ class ProductController extends Controller
         return response()->json([
             'message' => 'Product deleted successfully.',
         ]);
+    }
+
+    private function appendBranchQuantities($products): void
+    {
+        $products->each(function (Product $product) {
+            $branchQuantities = $product->inventories
+                ->groupBy('branch_id')
+                ->map(function ($items) {
+                    $firstItem = $items->first();
+                    $branch = $firstItem?->branch;
+
+                    return [
+                        'branch_id' => $firstItem?->branch_id,
+                        'branch_name' => $branch?->name,
+                        'quantity' => $items->sum('quantity'),
+                    ];
+                })
+                ->values();
+
+            $product->setAttribute('branch_quantities', $branchQuantities);
+        });
     }
 
     private function deletePublicFileFromUrl(?string $fileUrl): void

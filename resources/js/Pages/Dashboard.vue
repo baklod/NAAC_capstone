@@ -609,7 +609,7 @@ onUnmounted(() => {
 <template>
     <Head title="Dashboard" />
 
-    <AppLayout title="Dashboard">
+    <AppLayout title="Dashboard" class="app-shell--enter">
         <div class="grid-cards dashboard-metric-cards">
             <article
                 v-for="card in metricCards"

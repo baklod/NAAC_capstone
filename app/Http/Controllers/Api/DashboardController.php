@@ -7,6 +7,7 @@ use App\Models\Inventory;
 use App\Models\Product;
 use App\Models\Sale;
 use App\Models\User;
+use App\Services\ManagerBranchScope;
 use Carbon\Carbon;
 use Carbon\CarbonPeriod;
 use Illuminate\Http\Request;
@@ -15,20 +16,26 @@ class DashboardController extends Controller
 {
     public function index(Request $request)
     {
+        $branchIds = ManagerBranchScope::branchIdsFor($request->user());
+
+        if ($branchIds !== null && $branchIds === []) {
+            return response()->json(['data' => $this->emptyDashboardPayload('this_year')]);
+        }
+
         [$rangeKey, $startDate, $endDate] = $this->resolveDateRange($request);
 
-        $salesByBranch = $this->buildSalesByBranchSummary($startDate, $endDate);
-        $branchSalesChart = $this->buildBranchSalesChart($startDate, $endDate, $salesByBranch);
-        $monthlyDailyBarChart = $this->buildMonthlyDailyBarChart();
-        $latestSales = $this->buildLatestSales(7);
-        $topSellingProductsPie = $this->buildTopSellingProductsPieChart($startDate, $endDate);
+        $salesByBranch = $this->buildSalesByBranchSummary($startDate, $endDate, $branchIds);
+        $branchSalesChart = $this->buildBranchSalesChart($startDate, $endDate, $salesByBranch, $branchIds);
+        $monthlyDailyBarChart = $this->buildMonthlyDailyBarChart($branchIds);
+        $latestSales = $this->buildLatestSales(7, $branchIds);
+        $topSellingProductsPie = $this->buildTopSellingProductsPieChart($startDate, $endDate, $branchIds);
 
         return response()->json([
             'data' => [
-                'total_products' => Product::count(),
-                'total_sales' => (float) Sale::sum('total_price'),
-                'total_users' => User::count(),
-                'inventory_count' => (int) Inventory::sum('quantity'),
+                'total_products' => $this->countProducts($branchIds),
+                'total_sales' => $this->sumSales($branchIds),
+                'total_users' => $this->countUsers($branchIds),
+                'inventory_count' => $this->sumInventoryQuantity($branchIds),
                 'sales_by_branch' => $salesByBranch,
                 'branch_sales_chart' => [
                     'range' => $rangeKey,
@@ -51,6 +58,99 @@ class DashboardController extends Controller
                 ],
             ],
         ]);
+    }
+
+    private function emptyDashboardPayload(string $rangeKey): array
+    {
+        $monthStart = now()->copy()->startOfMonth()->startOfDay();
+        $monthEnd = now()->copy()->endOfDay();
+
+        return [
+            'total_products' => 0,
+            'total_sales' => 0,
+            'total_users' => 0,
+            'inventory_count' => 0,
+            'sales_by_branch' => [],
+            'branch_sales_chart' => [
+                'range' => $rangeKey,
+                'date_from' => now()->copy()->startOfYear()->toDateString(),
+                'date_to' => now()->copy()->endOfYear()->toDateString(),
+                'labels' => [],
+                'series' => [],
+            ],
+            'monthly_daily_bar_chart' => [
+                'date_from' => $monthStart->toDateString(),
+                'date_to' => $monthEnd->toDateString(),
+                'labels' => [],
+                'series' => [],
+            ],
+            'latest_sales' => [],
+            'top_selling_products_pie' => [
+                'labels' => [],
+                'series' => [],
+                'total_quantity' => 0,
+            ],
+        ];
+    }
+
+    private function countProducts(?array $branchIds): int
+    {
+        if ($branchIds === null) {
+            return Product::count();
+        }
+
+        return Product::query()
+            ->whereHas('inventories', function ($query) use ($branchIds) {
+                $query->whereIn('branch_id', $branchIds);
+            })
+            ->count();
+    }
+
+    private function sumSales(?array $branchIds): float
+    {
+        $query = Sale::query();
+
+        if ($branchIds !== null) {
+            $query->whereHas('processedBy.employee', function ($employeeQuery) use ($branchIds) {
+                $employeeQuery->whereIn('branch_id', $branchIds);
+            });
+        }
+
+        return (float) $query->sum('total_price');
+    }
+
+    private function countUsers(?array $branchIds): int
+    {
+        if ($branchIds === null) {
+            return User::count();
+        }
+
+        return User::query()
+            ->whereHas('employee', function ($query) use ($branchIds) {
+                $query->whereIn('branch_id', $branchIds);
+            })
+            ->count();
+    }
+
+    private function sumInventoryQuantity(?array $branchIds): int
+    {
+        $query = Inventory::query();
+
+        if ($branchIds !== null) {
+            $query->whereIn('branch_id', $branchIds);
+        }
+
+        return (int) $query->sum('quantity');
+    }
+
+    private function salesJoinQuery(?array $branchIds)
+    {
+        $query = Sale::query()
+            ->leftJoin('users', 'sales.processed_by_user_id', '=', 'users.id')
+            ->leftJoin('employees', 'users.employee_id', '=', 'employees.id')
+            ->leftJoin('branches', 'employees.branch_id', '=', 'branches.id');
+
+        return ManagerBranchScope::constrainJoinedSales($query, $branchIds);
     }
 
     private function resolveDateRange(Request $request): array
@@ -120,12 +220,9 @@ class DashboardController extends Controller
         ];
     }
 
-    private function buildSalesByBranchSummary(Carbon $startDate, Carbon $endDate): array
+    private function buildSalesByBranchSummary(Carbon $startDate, Carbon $endDate, ?array $branchIds): array
     {
-        return Sale::query()
-            ->leftJoin('users', 'sales.processed_by_user_id', '=', 'users.id')
-            ->leftJoin('employees', 'users.employee_id', '=', 'employees.id')
-            ->leftJoin('branches', 'employees.branch_id', '=', 'branches.id')
+        return $this->salesJoinQuery($branchIds)
             ->whereBetween('sales.created_at', [$startDate, $endDate])
             ->selectRaw('branches.id as branch_id')
             ->selectRaw('branches.name as branch_name')
@@ -146,10 +243,14 @@ class DashboardController extends Controller
             ->all();
     }
 
-    private function buildBranchSalesChart(Carbon $startDate, Carbon $endDate, array $salesByBranch): array
-    {
+    private function buildBranchSalesChart(
+        Carbon $startDate,
+        Carbon $endDate,
+        array $salesByBranch,
+        ?array $branchIds,
+    ): array {
         $selectedBranches = collect($salesByBranch)
-            ->take(5)
+            ->take($branchIds !== null ? 1 : 5)
             ->map(function (array $branch) {
                 $key = $branch['branch_id'] !== null
                     ? 'branch_' . $branch['branch_id']
@@ -170,10 +271,7 @@ class DashboardController extends Controller
             ];
         }
 
-        $dailyRows = Sale::query()
-            ->leftJoin('users', 'sales.processed_by_user_id', '=', 'users.id')
-            ->leftJoin('employees', 'users.employee_id', '=', 'employees.id')
-            ->leftJoin('branches', 'employees.branch_id', '=', 'branches.id')
+        $dailyRows = $this->salesJoinQuery($branchIds)
             ->whereBetween('sales.created_at', [$startDate, $endDate])
             ->selectRaw('DATE(sales.created_at) as sale_date')
             ->selectRaw('branches.id as branch_id')
@@ -242,7 +340,7 @@ class DashboardController extends Controller
         ];
     }
 
-    private function buildMonthlyDailyBarChart(): array
+    private function buildMonthlyDailyBarChart(?array $branchIds): array
     {
         $monthStart = now()->copy()->startOfMonth()->startOfDay();
         $monthEnd = now()->copy()->endOfDay();
@@ -262,17 +360,14 @@ class DashboardController extends Controller
             ->mapWithKeys(fn (Carbon $date, int $index) => [$date->format('Y-m-d') => $index])
             ->all();
 
-        $selectedBranches = Sale::query()
-            ->leftJoin('users', 'sales.processed_by_user_id', '=', 'users.id')
-            ->leftJoin('employees', 'users.employee_id', '=', 'employees.id')
-            ->leftJoin('branches', 'employees.branch_id', '=', 'branches.id')
+        $selectedBranches = $this->salesJoinQuery($branchIds)
             ->whereBetween('sales.created_at', [$monthStart, $monthEnd])
             ->selectRaw('branches.id as branch_id')
             ->selectRaw('branches.name as branch_name')
             ->selectRaw('COALESCE(SUM(sales.total_price), 0) as total_sales')
             ->groupBy('branches.id', 'branches.name')
             ->orderByDesc('total_sales')
-            ->limit(2)
+            ->limit($branchIds !== null ? 1 : 2)
             ->get()
             ->map(function ($row) {
                 $branchId = $row->branch_id !== null ? (int) $row->branch_id : null;
@@ -294,10 +389,7 @@ class DashboardController extends Controller
             ];
         }
 
-        $dailyRows = Sale::query()
-            ->leftJoin('users', 'sales.processed_by_user_id', '=', 'users.id')
-            ->leftJoin('employees', 'users.employee_id', '=', 'employees.id')
-            ->leftJoin('branches', 'employees.branch_id', '=', 'branches.id')
+        $dailyRows = $this->salesJoinQuery($branchIds)
             ->whereBetween('sales.created_at', [$monthStart, $monthEnd])
             ->selectRaw('DATE(sales.created_at) as sale_date')
             ->selectRaw('branches.id as branch_id')
@@ -349,13 +441,21 @@ class DashboardController extends Controller
         ];
     }
 
-    private function buildLatestSales(int $limit = 10): array
+    private function buildLatestSales(int $limit, ?array $branchIds): array
     {
-        return Sale::query()
+        $query = Sale::query()
             ->with([
                 'product:id,name',
                 'processedBy:id,name,user_name',
-            ])
+            ]);
+
+        if ($branchIds !== null) {
+            $query->whereHas('processedBy.employee', function ($employeeQuery) use ($branchIds) {
+                $employeeQuery->whereIn('branch_id', $branchIds);
+            });
+        }
+
+        return $query
             ->latest('created_at')
             ->limit($limit)
             ->get()
@@ -378,11 +478,20 @@ class DashboardController extends Controller
             ->all();
     }
 
-    private function buildTopSellingProductsPieChart(Carbon $startDate, Carbon $endDate): array
-    {
-        $rows = Sale::query()
+    private function buildTopSellingProductsPieChart(
+        Carbon $startDate,
+        Carbon $endDate,
+        ?array $branchIds,
+    ): array {
+        $query = Sale::query()
             ->join('products', 'sales.product_id', '=', 'products.id')
-            ->whereBetween('sales.created_at', [$startDate, $endDate])
+            ->leftJoin('users', 'sales.processed_by_user_id', '=', 'users.id')
+            ->leftJoin('employees', 'users.employee_id', '=', 'employees.id')
+            ->whereBetween('sales.created_at', [$startDate, $endDate]);
+
+        $query = ManagerBranchScope::constrainJoinedSales($query, $branchIds);
+
+        $rows = $query
             ->selectRaw('products.id as product_id')
             ->selectRaw('products.name as product_name')
             ->selectRaw('COALESCE(SUM(sales.quantity), 0) as total_quantity')

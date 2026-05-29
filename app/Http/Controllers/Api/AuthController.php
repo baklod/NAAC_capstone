@@ -3,7 +3,9 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Branch;
 use App\Models\User;
+use App\Services\UserLoginGuard;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 
@@ -19,7 +21,10 @@ class AuthController extends Controller
 
         $username = trim((string) ($validated['username'] ?? $validated['user_name'] ?? ''));
 
-        $user = User::with('employee.branch:id,name')
+        $user = User::with([
+            'employee.branch:id,name,location',
+            'managedBranch:id,name,location',
+        ])
             ->where('user_name', $username)
             ->first();
 
@@ -35,6 +40,14 @@ class AuthController extends Controller
             ], 403);
         }
 
+        $loginError = UserLoginGuard::apiLoginError($user);
+
+        if ($loginError) {
+            return response()->json([
+                'message' => $loginError,
+            ], 403);
+        }
+
         if (array_key_exists('is_online', $user->getAttributes()) && !$user->is_online) {
             $user->forceFill([
                 'is_online' => true,
@@ -46,6 +59,8 @@ class AuthController extends Controller
             ?? null;
 
         $employeeProfilePath = $user->employee?->profile_picture ?? null;
+        $branch = $user->employee?->branch ?? $user->managedBranch;
+        $branchPayload = $this->branchPayload($branch);
 
         return response()->json([
             'message' => 'Login successful.',
@@ -60,24 +75,44 @@ class AuthController extends Controller
 
                 // Added for Flutter profile image support
                 'profile_picture' => $profilePath,
-                'profile_picture_url' => $this->buildPublicImageUrl($profilePath),
+                'profile_picture_url' => $this->buildPublicImageUrl($profilePath, $request),
+
+                // Flutter reads branch.id / branch.name / branch.location
+                'branch' => $branchPayload,
 
                 'employee' => $user->employee
                     ? [
                         'id' => $user->employee->id,
-                        'branch_id' => $user->employee->branch_id,
-                        'branch_name' => $user->employee->branch?->name,
+                        'branch_id' => $branch?->id ?? $user->employee->branch_id,
+                        'branch_name' => $branch?->name,
+                        'branch' => $branchPayload,
 
                         // Optional mirror fields
                         'profile_picture' => $employeeProfilePath,
-                        'profile_picture_url' => $this->buildPublicImageUrl($employeeProfilePath),
+                        'profile_picture_url' => $this->buildPublicImageUrl($employeeProfilePath, $request),
                     ]
                     : null,
             ],
         ]);
     }
 
-    private function buildPublicImageUrl(?string $path): ?string
+    /**
+     * @return array{id: int, name: string, location: string}|null
+     */
+    private function branchPayload(?Branch $branch): ?array
+    {
+        if (!$branch) {
+            return null;
+        }
+
+        return [
+            'id' => $branch->id,
+            'name' => $branch->name,
+            'location' => $branch->location,
+        ];
+    }
+
+    private function buildPublicImageUrl(?string $path, Request $request): ?string
     {
         if ($path === null) {
             return null;
@@ -95,7 +130,7 @@ class AuthController extends Controller
 
         // Protocol-relative URL
         if (str_starts_with($path, '//')) {
-            return request()->getScheme() . ':' . $path;
+            return $request->getScheme() . ':' . $path;
         }
 
         // Normalize storage path

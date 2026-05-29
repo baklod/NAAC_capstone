@@ -1,6 +1,7 @@
 <script setup>
 import { Head } from "@inertiajs/vue3";
-import { onMounted, reactive, ref } from "vue";
+import { UserPlus } from "lucide-vue-next";
+import { onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import AppLayout from "../components/layout/AppLayout.vue";
 import Button from "../components/ui/Button.vue";
 import Card from "../components/ui/Card.vue";
@@ -12,6 +13,7 @@ import api from "../services/api";
 const users = ref([]);
 const showModal = ref(false);
 const isSaving = ref(false);
+const profilePreviewUrl = ref("");
 
 const form = reactive({
     name: "",
@@ -21,8 +23,21 @@ const form = reactive({
     profile_picture: null,
 });
 
+const clearProfilePreview = () => {
+    if (profilePreviewUrl.value) {
+        URL.revokeObjectURL(profilePreviewUrl.value);
+        profilePreviewUrl.value = "";
+    }
+};
+
 const onProfilePictureChange = (event) => {
-    form.profile_picture = event.target.files?.[0] ?? null;
+    const file = event.target.files?.[0] ?? null;
+    form.profile_picture = file;
+    clearProfilePreview();
+
+    if (file) {
+        profilePreviewUrl.value = URL.createObjectURL(file);
+    }
 };
 
 const loadUsers = async () => {
@@ -54,11 +69,16 @@ const saveUser = async () => {
         form.password = "";
         form.role = "staff";
         form.profile_picture = null;
+        clearProfilePreview();
         await loadUsers();
     } finally {
         isSaving.value = false;
     }
 };
+
+onBeforeUnmount(() => {
+    clearProfilePreview();
+});
 
 onMounted(loadUsers);
 </script>
@@ -67,55 +87,88 @@ onMounted(loadUsers);
     <Head title="Users" />
 
     <AppLayout title="Users">
-        <Card title="User Management">
-            <div class="toolbar">
-                <Button @click="showModal = true">Add User</Button>
-            </div>
-
-            <Table :columns="['Profile', 'Name', 'Email', 'Role', 'Status']">
-                <tr v-for="user in users" :key="user.id">
-                    <td>
-                        <img
-                            v-if="user.profile_picture"
-                            :src="user.profile_picture"
-                            :alt="user.name"
-                            class="table-avatar"
-                        />
-                        <span v-else>-</span>
-                    </td>
-                    <td>{{ user.name }}</td>
-                    <td>{{ user.email }}</td>
-                    <td>{{ user.role }}</td>
-                    <td>{{ user.is_active ? "Active" : "Inactive" }}</td>
-                </tr>
-            </Table>
-        </Card>
-
-        <Modal :open="showModal" title="Create User" @close="showModal = false">
-            <form class="form-grid" @submit.prevent="saveUser">
-                <Input v-model="form.name" label="Name" />
-                <Input v-model="form.email" type="email" label="Email" />
-                <Input
-                    v-model="form.password"
-                    type="password"
-                    label="Password"
-                />
-                <Input v-model="form.role" label="Role" />
-                <label class="form-field">
-                    <span class="form-field__label">Profile Picture</span>
-                    <input
-                        class="input"
-                        type="file"
-                        accept="image/*"
-                        @change="onProfilePictureChange"
-                    />
-                </label>
-                <div class="form-actions">
-                    <Button type="submit" :disabled="isSaving">
-                        {{ isSaving ? "Saving..." : "Save" }}
-                    </Button>
+        <div class="users-page">
+            <Card title="User Management">
+                <div class="toolbar">
+                    <Button @click="showModal = true">Add User</Button>
                 </div>
-            </form>
-        </Modal>
+
+                <Table
+                    :columns="['Profile', 'Name', 'Email', 'Role', 'Status']"
+                >
+                    <tr v-for="user in users" :key="user.id">
+                        <td>
+                            <img
+                                v-if="user.profile_picture"
+                                :src="user.profile_picture"
+                                :alt="user.name"
+                                class="table-avatar"
+                            />
+                            <span v-else>-</span>
+                        </td>
+                        <td>{{ user.name }}</td>
+                        <td>{{ user.email }}</td>
+                        <td>{{ user.role }}</td>
+                        <td>{{ user.is_active ? "Active" : "Inactive" }}</td>
+                    </tr>
+                </Table>
+            </Card>
+
+            <Modal
+                :open="showModal"
+                title="Create User"
+                @close="showModal = false"
+            >
+                <form class="form-grid" @submit.prevent="saveUser">
+                    <div class="products-modal-head">
+                        <UserPlus class="products-modal-head-icon" />
+                        <p class="products-modal-head-text">
+                            Add a new user and assign their access level.
+                        </p>
+                    </div>
+                    <Input v-model="form.name" label="Name" />
+                    <Input v-model="form.email" type="email" label="Email" />
+                    <Input
+                        v-model="form.password"
+                        type="password"
+                        label="Password"
+                    />
+                    <label class="form-field">
+                        <span class="form-field__label">Role</span>
+                        <select v-model="form.role" class="input" required>
+                            <option value="admin">Admin</option>
+                            <option value="manager">Manager</option>
+                            <option value="staff">Staff</option>
+                        </select>
+                    </label>
+                    <label class="form-field">
+                        <span class="form-field__label">Profile Picture</span>
+                        <div class="users-upload">
+                            <input
+                                class="input users-upload__input"
+                                type="file"
+                                accept="image/*"
+                                @change="onProfilePictureChange"
+                            />
+                        </div>
+                        <div
+                            v-if="profilePreviewUrl"
+                            class="users-upload-preview"
+                        >
+                            <img
+                                :src="profilePreviewUrl"
+                                alt="Profile preview"
+                                class="users-upload-preview__image"
+                            />
+                        </div>
+                    </label>
+                    <div class="form-actions">
+                        <Button type="submit" :disabled="isSaving">
+                            {{ isSaving ? "Saving..." : "Save" }}
+                        </Button>
+                    </div>
+                </form>
+            </Modal>
+        </div>
     </AppLayout>
 </template>

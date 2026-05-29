@@ -3,20 +3,30 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Inventory;
 use App\Models\Product;
 use App\Models\Sale;
+use App\Models\User;
+use App\Services\ManagerBranchScope;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 
 class SaleController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        $sales = Sale::with([
-            'product',
-            'processedBy:id,name,user_name,email',
-        ])->latest()->get();
+        $sales = ManagerBranchScope::scopeSales(
+            Sale::with([
+                'product',
+                'processedBy:id,name,user_name,email',
+                'processedBy.employee.branch:id,name,location',
+            ]),
+            $request->user(),
+        )
+            ->latest()
+            ->get();
 
         return response()->json(['data' => $sales]);
     }
@@ -48,15 +58,83 @@ class SaleController extends Controller
         ], $created ? 201 : 200);
     }
 
+    public function historyFromFlutter(Request $request)
+    {
+        // Allow unauthenticated access if branch_id is provided
+        if (!$request->user() && !$request->has('branch_id')) {
+            return response()->json(['error' => 'Unauthorized'], 401);
+        }
+
+        $validated = $request->validate([
+            'product_id' => ['nullable', 'exists:products,id'],
+            'sale_number' => ['nullable', 'string', 'max:32'],
+            'from' => ['nullable', 'date'],
+            'to' => ['nullable', 'date'],
+            'limit' => ['nullable', 'integer', 'min:1', 'max:500'],
+            'branch_id' => ['nullable', 'exists:branches,id'],
+            'payment_method' => ['nullable', 'string', 'max:20'],
+        ]);
+
+        $query = Sale::with([
+            'product:id,name,price,unit,category,image',
+            'processedBy:id,name,user_name,email,employee_id',
+            'processedBy.employee:id,branch_id,first_name,last_name',
+            'processedBy.employee.branch:id,name,location',
+        ])->latest();
+
+        // Filter by branch if provided
+        if (isset($validated['branch_id'])) {
+            $branchId = $validated['branch_id'];
+            $query->whereHas('processedBy.employee', function ($q) use ($branchId) {
+                $q->where('branch_id', $branchId);
+            });
+        }
+
+        // Filter by payment method if provided
+        if (isset($validated['payment_method'])) {
+            $paymentMethod = trim((string) $validated['payment_method']);
+            if ($paymentMethod !== '') {
+                $query->where('payment_method', $paymentMethod);
+            }
+        }
+
+        if (isset($validated['product_id'])) {
+            $query->where('product_id', $validated['product_id']);
+        }
+
+        if (isset($validated['sale_number'])) {
+            $saleNumber = trim((string) $validated['sale_number']);
+
+            if ($saleNumber !== '') {
+                $query->where('sale_number', substr($saleNumber, 0, 32));
+            }
+        }
+
+        if (isset($validated['from'])) {
+            $query->where('created_at', '>=', Carbon::parse((string) $validated['from']));
+        }
+
+        if (isset($validated['to'])) {
+            $query->where('created_at', '<=', Carbon::parse((string) $validated['to']));
+        }
+
+        $limit = isset($validated['limit']) ? (int) $validated['limit'] : 200;
+        $sales = $query->limit($limit)->get();
+
+        return response()->json(['data' => $sales]);
+    }
+
     private function validateSalePayload(Request $request): array
     {
         return $request->validate([
             'product_id' => ['required', 'exists:products,id'],
             'quantity' => ['required', 'integer', 'min:1'],
             'processed_by_user_id' => ['nullable', 'exists:users,id'],
+            'user_id' => ['nullable', 'exists:users,id'],
             'unit_type' => ['nullable', 'string', 'max:20'],
             'sale_number' => ['nullable', 'string', 'max:32'],
             'idempotency_key' => ['nullable', 'string', 'max:100'],
+            'payment_method' => ['nullable', 'string', 'max:20'],
             'processed_at_utc' => ['nullable', 'date'],
             'processed_at' => ['nullable', 'date'],
             'sold_at' => ['nullable', 'date'],
@@ -66,7 +144,8 @@ class SaleController extends Controller
 
     private function createSale(Request $request, array $validated, bool $useClientTimestamp = false): array
     {
-        $processedByUserId = $request->user()?->id ?? ($validated['processed_by_user_id'] ?? null);
+        $processedByUserId = $request->user()?->id
+            ?? ($validated['processed_by_user_id'] ?? $validated['user_id'] ?? null);
         $idempotencyKey = isset($validated['idempotency_key'])
             ? trim((string) $validated['idempotency_key'])
             : null;
@@ -92,6 +171,7 @@ class SaleController extends Controller
             'unit_type' => $unitType,
             'quantity' => $validated['quantity'],
             'total_price' => $totalPrice,
+            'payment_method' => $validated['payment_method'] ?? 'cash',
         ];
 
         if ($requestedSaleNumber !== null) {
@@ -114,12 +194,17 @@ class SaleController extends Controller
         }
 
         try {
-            $sale = Sale::create($attributes)->load([
-                'product',
-                'processedBy:id,name,user_name,email',
-            ]);
+            $sale = DB::transaction(function () use ($attributes, $processedByUserId, $request) {
+                $sale = Sale::create($attributes)->load([
+                    'product',
+                    'processedBy:id,name,user_name,email',
+                ]);
 
-            $sale = $this->ensureSaleNumber($sale);
+                $sale = $this->ensureSaleNumber($sale);
+                $this->decrementInventoryForSale($sale, $processedByUserId, $request->user());
+
+                return $sale;
+            });
 
             return [$sale, true];
         } catch (QueryException $exception) {
@@ -145,6 +230,57 @@ class SaleController extends Controller
         $sqlState = (string) $exception->getCode();
 
         return in_array($sqlState, ['23000', '23505'], true);
+    }
+
+    private function decrementInventoryForSale(Sale $sale, ?int $processedByUserId, ?User $requestUser): void
+    {
+        if ($processedByUserId === null && $requestUser === null) {
+            return;
+        }
+
+        $branchId = $this->resolveSaleBranchId($processedByUserId, $requestUser);
+
+        if ($branchId === null) {
+            return;
+        }
+
+        $inventory = Inventory::query()
+            ->where('branch_id', $branchId)
+            ->where('product_id', $sale->product_id)
+            ->orderByDesc('id')
+            ->lockForUpdate()
+            ->first();
+
+        if (!$inventory) {
+            return;
+        }
+
+        $newQty = max(0, (int) $inventory->quantity - (int) $sale->quantity);
+
+        $inventory->update([
+            'quantity' => $newQty,
+            'status' => $newQty === 0 ? 'out_of_stock' : $inventory->status,
+        ]);
+    }
+
+    private function resolveSaleBranchId(?int $processedByUserId, ?User $requestUser): ?int
+    {
+        $resolvedUser = $requestUser;
+
+        if ($processedByUserId !== null && (!$resolvedUser || $resolvedUser->id !== $processedByUserId)) {
+            $resolvedUser = User::with([
+                'employee:id,branch_id',
+                'managedBranch:id',
+            ])->find($processedByUserId);
+        } elseif ($resolvedUser) {
+            $resolvedUser->loadMissing([
+                'employee:id,branch_id',
+                'managedBranch:id',
+            ]);
+        }
+
+        return $resolvedUser?->employee?->branch_id
+            ?? $resolvedUser?->managedBranch?->id;
     }
 
     private function resolveUnitType(?string $requestedUnitType, ?string $productUnit): ?string

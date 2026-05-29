@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Auth\AuthenticatedSessionController;
+use App\Support\InertiaAdminPage;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Route;
 use Inertia\Inertia;
@@ -10,24 +11,26 @@ Route::get('/', function () {
 		return redirect('/dashboard');
 	}
 
-	return Inertia::render('Landing');
+	return Inertia::render('Landing', [
+		'turnstileSiteKey' => config('services.turnstile.site_key'),
+	]);
 })->name('login');
 
 Route::middleware('guest')->group(function () {
 	Route::post('/login', [AuthenticatedSessionController::class, 'store'])->name('login.store');
 });
 
-Route::middleware('auth')->group(function () {
+Route::middleware(['auth', 'web.access'])->group(function () {
 	Route::get('/dashboard', fn () => Inertia::render('Dashboard'));
 	Route::get('/products', fn () => Inertia::render('Products'));
 	Route::get('/inventories', fn () => Inertia::render('Inventories'));
 	Route::get('/sales-report', fn () => Inertia::render('SalesReport'));
 	Route::get('/product-profit-analysis', fn () => Inertia::render('ProductProfitAnalysis'));
-	Route::get('/trucking', fn () => Inertia::render('Trucking'));
-	Route::get('/employees', fn () => Inertia::render('Employees'));
-	Route::get('/branches', fn () => Inertia::render('Branches'));
-	Route::get('/users', fn () => Inertia::render('Users'));
-	Route::get('/settings', fn () => Inertia::render('Settings'));
+	Route::get('/trucking', fn () => InertiaAdminPage::render('Trucking', 'Trucking'));
+	Route::get('/employees', fn () => InertiaAdminPage::render('Employees', 'Employees'));
+	Route::get('/branches', fn () => InertiaAdminPage::render('Branches', 'Branches'));
+	Route::get('/users', fn () => InertiaAdminPage::render('Users', 'Users'));
+	Route::get('/settings', fn () => InertiaAdminPage::render('Settings', 'Settings'));
 
 	Route::post('/logout', [AuthenticatedSessionController::class, 'destroy'])->name('logout');
 });

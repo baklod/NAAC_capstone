@@ -11,7 +11,14 @@ import {
     TriangleAlert,
     User,
 } from "lucide-vue-next";
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import {
+    computed,
+    onBeforeUnmount,
+    onMounted,
+    reactive,
+    ref,
+    watch,
+} from "vue";
 import AppLayout from "../components/layout/AppLayout.vue";
 import Button from "../components/ui/Button.vue";
 import Card from "../components/ui/Card.vue";
@@ -33,6 +40,7 @@ const sortBy = ref("name_asc");
 const currentPage = ref(1);
 const pageSize = 15;
 const isSaving = ref(false);
+const profilePreviewUrl = ref("");
 
 const form = reactive({
     branch_id: "",
@@ -165,6 +173,13 @@ watch(totalPages, (pages) => {
     }
 });
 
+const clearProfilePreview = () => {
+    if (profilePreviewUrl.value) {
+        URL.revokeObjectURL(profilePreviewUrl.value);
+        profilePreviewUrl.value = "";
+    }
+};
+
 const resetForm = () => {
     form.branch_id = "";
     form.first_name = "";
@@ -174,6 +189,7 @@ const resetForm = () => {
     form.address = "";
     form.profile_picture = null;
     editingId.value = null;
+    clearProfilePreview();
 };
 
 const openCreate = () => {
@@ -182,6 +198,7 @@ const openCreate = () => {
 };
 
 const openEdit = (employee) => {
+    clearProfilePreview();
     form.branch_id = employee.branch_id ? String(employee.branch_id) : "";
     form.first_name = employee.first_name ?? "";
     form.last_name = employee.last_name ?? "";
@@ -194,7 +211,13 @@ const openEdit = (employee) => {
 };
 
 const onProfilePictureChange = (event) => {
-    form.profile_picture = event.target.files?.[0] ?? null;
+    const file = event.target.files?.[0] ?? null;
+    form.profile_picture = file;
+    clearProfilePreview();
+
+    if (file) {
+        profilePreviewUrl.value = URL.createObjectURL(file);
+    }
 };
 
 const getApiErrorMessage = (error, fallback) => {
@@ -297,6 +320,10 @@ const confirmDelete = async () => {
 };
 
 const formatEmployeeName = (employee) => getEmployeeName(employee) || "-";
+
+onBeforeUnmount(() => {
+    clearProfilePreview();
+});
 
 onMounted(async () => {
     await Promise.all([loadEmployees(), loadBranches()]);
@@ -463,9 +490,13 @@ onMounted(async () => {
             <Modal
                 :open="showModal"
                 :title="editingId ? 'Edit Employee' : 'Create Employee'"
+                class="employees-modal"
                 @close="showModal = false"
             >
-                <form class="form-grid" @submit.prevent="saveEmployee">
+                <form
+                    class="form-grid employees-form"
+                    @submit.prevent="saveEmployee"
+                >
                     <div class="products-modal-head">
                         <User class="products-modal-head-icon" />
                         <p class="products-modal-head-text">
@@ -477,7 +508,7 @@ onMounted(async () => {
                         </p>
                     </div>
 
-                    <label class="form-field">
+                    <label class="form-field employees-form__full">
                         <span class="form-field__label">Branch</span>
                         <select v-model="form.branch_id" class="input" required>
                             <option value="">Select branch</option>
@@ -495,7 +526,7 @@ onMounted(async () => {
                     <Input v-model="form.last_name" label="Last Name" />
                     <Input
                         v-model="form.contact_number"
-                        type="number"
+                        type="text"
                         label="Contact Number"
                     />
                     <Input
@@ -503,15 +534,31 @@ onMounted(async () => {
                         type="email"
                         label="Contact Email"
                     />
-                    <Input v-model="form.address" label="Address" />
-                    <label class="form-field">
+                    <Input
+                        v-model="form.address"
+                        label="Address"
+                        class="employees-form__full"
+                    />
+                    <label class="form-field employees-form__full">
                         <span class="form-field__label">Profile Picture</span>
-                        <input
-                            class="input"
-                            type="file"
-                            accept="image/*"
-                            @change="onProfilePictureChange"
-                        />
+                        <div class="users-upload">
+                            <input
+                                class="input users-upload__input"
+                                type="file"
+                                accept="image/*"
+                                @change="onProfilePictureChange"
+                            />
+                        </div>
+                        <div
+                            v-if="profilePreviewUrl"
+                            class="users-upload-preview"
+                        >
+                            <img
+                                :src="profilePreviewUrl"
+                                alt="Profile preview"
+                                class="users-upload-preview__image"
+                            />
+                        </div>
                     </label>
                     <p v-if="editingId" class="form-hint">
                         Leave image empty to keep the current profile picture.

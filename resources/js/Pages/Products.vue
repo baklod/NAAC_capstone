@@ -35,6 +35,7 @@ const isSaving = ref(false);
 
 const form = reactive({
     name: "",
+    category: "",
     unit: "pcs",
     price: "",
     description: "",
@@ -46,14 +47,76 @@ const loadProducts = async () => {
     products.value = data.data;
 };
 
+const hasDigits = (value) => /\d/.test(value);
+
 const unitOptions = computed(() => {
     const units = new Set(
         products.value
             .map((product) => (product.unit || "").trim())
-            .filter(Boolean),
+            .filter((unit) => unit && !hasDigits(unit)),
     );
 
     return ["all", ...Array.from(units).sort((a, b) => a.localeCompare(b))];
+});
+
+const unitChoices = computed(() => {
+    const baseUnits = [
+        "pcs",
+        "piece",
+        "set",
+        "pair",
+        "dozen",
+        "g",
+        "kg",
+        "lb",
+        "oz",
+        "ton",
+        "ml",
+        "liter",
+        "gal",
+        "m",
+        "cm",
+        "mm",
+        "in",
+        "ft",
+        "bag",
+        "sack",
+        "cavan",
+        "bale",
+        "box",
+        "carton",
+        "case",
+        "pack",
+        "packet",
+        "pouch",
+        "sachet",
+        "bottle",
+        "jar",
+        "can",
+        "roll",
+        "tube",
+        "tray",
+        "bundle",
+        "bunch",
+        "crate",
+        "pallet",
+    ];
+    const units = new Set(
+        products.value
+            .map((product) => (product.unit || "").trim())
+            .filter((unit) => unit && !hasDigits(unit)),
+    );
+
+    if (form.unit && !hasDigits(form.unit)) {
+        units.add(form.unit);
+    }
+
+    const extraUnits = Array.from(units).filter(
+        (unit) => !baseUnits.includes(unit),
+    );
+    extraUnits.sort((a, b) => a.localeCompare(b));
+
+    return [...baseUnits, ...extraUnits];
 });
 
 const filteredProducts = computed(() => {
@@ -64,6 +127,7 @@ const filteredProducts = computed(() => {
         list = list.filter((product) => {
             const haystack = [
                 product.name,
+                product.category,
                 product.unit,
                 product.description,
                 String(product.price ?? ""),
@@ -143,6 +207,7 @@ watch(totalPages, (pages) => {
 
 const resetForm = () => {
     form.name = "";
+    form.category = "";
     form.unit = "pcs";
     form.price = "";
     form.description = "";
@@ -157,6 +222,7 @@ const openCreate = () => {
 
 const openEdit = (product) => {
     form.name = product.name;
+    form.category = product.category ?? "";
     form.unit = product.unit ?? "pcs";
     form.price = product.price;
     form.description = product.description ?? "";
@@ -177,6 +243,7 @@ const saveProduct = async () => {
     isSaving.value = true;
     const payload = new FormData();
     payload.append("name", form.name);
+    payload.append("category", form.category ?? "");
     payload.append("unit", form.unit);
     payload.append("price", String(Number(form.price)));
     payload.append("description", form.description ?? "");
@@ -245,7 +312,7 @@ onMounted(loadProducts);
                                 v-model="searchQuery"
                                 class="input"
                                 type="text"
-                                placeholder="Search name, unit, price, description"
+                                placeholder="Search name, category, unit, price, description"
                             />
                         </label>
 
@@ -294,6 +361,7 @@ onMounted(loadProducts);
                     :columns="[
                         'Image',
                         'Name',
+                        'Category',
                         'Unit',
                         'Price',
                         'Description',
@@ -301,7 +369,7 @@ onMounted(loadProducts);
                     ]"
                 >
                     <tr v-if="filteredProducts.length === 0">
-                        <td class="products-empty" colspan="6">
+                        <td class="products-empty" colspan="7">
                             No products match your current search/filters.
                         </td>
                     </tr>
@@ -317,26 +385,29 @@ onMounted(loadProducts);
                             <span v-else>-</span>
                         </td>
                         <td>{{ product.name }}</td>
+                        <td>{{ product.category || "-" }}</td>
                         <td>{{ product.unit || "-" }}</td>
                         <td>{{ Number(product.price).toFixed(2) }}</td>
                         <td>{{ product.description || "-" }}</td>
-                        <td class="actions">
-                            <Button
-                                variant="outline"
-                                class="products-action-btn"
-                                @click="openEdit(product)"
-                            >
-                                <SquarePen class="products-btn-icon" />
-                                <span>Edit</span>
-                            </Button>
-                            <Button
-                                variant="danger"
-                                class="products-action-btn products-action-btn--danger"
-                                @click="requestDelete(product)"
-                            >
-                                <Trash2 class="products-btn-icon" />
-                                <span>Delete</span>
-                            </Button>
+                        <td>
+                            <div class="actions">
+                                <Button
+                                    variant="outline"
+                                    class="products-action-btn"
+                                    @click="openEdit(product)"
+                                >
+                                    <SquarePen class="products-btn-icon" />
+                                    <span>Edit</span>
+                                </Button>
+                                <Button
+                                    variant="danger"
+                                    class="products-action-btn products-action-btn--danger"
+                                    @click="requestDelete(product)"
+                                >
+                                    <Trash2 class="products-btn-icon" />
+                                    <span>Delete</span>
+                                </Button>
+                            </div>
                         </td>
                     </tr>
                 </Table>
@@ -411,10 +482,22 @@ onMounted(loadProducts);
                         placeholder="Product name"
                     />
                     <Input
-                        v-model="form.unit"
-                        label="Unit"
-                        placeholder="e.g. pcs, kg, box"
+                        v-model="form.category"
+                        label="Category"
+                        placeholder="e.g. Seeds, Fertilizer"
                     />
+                    <label class="form-field">
+                        <span class="form-field__label">Unit</span>
+                        <select v-model="form.unit" class="input">
+                            <option
+                                v-for="unit in unitChoices"
+                                :key="unit"
+                                :value="unit"
+                            >
+                                {{ unit }}
+                            </option>
+                        </select>
+                    </label>
                     <Input
                         v-model="form.price"
                         type="number"

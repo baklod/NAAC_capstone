@@ -37,7 +37,13 @@ class EmployeeController extends Controller
             'branch_id' => ['required', 'exists:branches,id'],
             'first_name' => ['required', 'string', 'max:255'],
             'last_name' => ['nullable', 'string', 'max:255'],
-            'contact_number' => ['required', 'integer', 'min:1', Rule::unique('employees', 'contact_number')],
+            'contact_number' => [
+                'required',
+                'string',
+                'max:20',
+                'regex:/^[0-9]+$/',
+                Rule::unique('employees', 'contact_number'),
+            ],
             'contact_email' => [
                 'required',
                 'email',
@@ -45,7 +51,7 @@ class EmployeeController extends Controller
                 Rule::unique('employees', 'contact_email'),
                 Rule::unique('users', 'email'),
             ],
-            'address' => ['required', 'string', 'max:255', Rule::unique('employees', 'address')],
+            'address' => ['nullable', 'string', 'max:255'],
             'profile_picture' => ['nullable', 'image', 'max:4096'],
         ]);
 
@@ -128,8 +134,9 @@ class EmployeeController extends Controller
             'last_name' => ['nullable', 'string', 'max:255'],
             'contact_number' => [
                 'required',
-                'integer',
-                'min:1',
+                'string',
+                'max:20',
+                'regex:/^[0-9]+$/',
                 Rule::unique('employees', 'contact_number')->ignore($employee->id),
             ],
             'contact_email' => [
@@ -139,12 +146,7 @@ class EmployeeController extends Controller
                 Rule::unique('employees', 'contact_email')->ignore($employee->id),
                 Rule::unique('users', 'email')->ignore($currentUserId),
             ],
-            'address' => [
-                'required',
-                'string',
-                'max:255',
-                Rule::unique('employees', 'address')->ignore($employee->id),
-            ],
+            'address' => ['nullable', 'string', 'max:255'],
             'profile_picture' => ['nullable', 'image', 'max:4096'],
         ]);
 

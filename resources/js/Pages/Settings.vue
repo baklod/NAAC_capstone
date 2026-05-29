@@ -17,7 +17,13 @@ const form = reactive({
 
 const loadSettings = async () => {
     const { data } = await api.get("/settings");
-    Object.assign(form, data.data);
+    const settings = data.data;
+
+    form.company_name = settings.company_name ?? "";
+    form.support_email = settings.support_email ?? "";
+    form.timezone = settings.timezone ?? "UTC";
+    form.currency = settings.currency ?? "USD";
+    form.low_stock_threshold = settings.low_stock_threshold ?? 10;
 };
 
 const saveSettings = async () => {

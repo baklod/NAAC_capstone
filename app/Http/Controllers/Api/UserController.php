@@ -15,16 +15,25 @@ class UserController extends Controller
     public function index()
     {
         $users = User::query()
-            ->with('employee')
+            ->with('employee.branch')
             ->latest()
             ->get()
             ->map(function (User $user) {
+                $branch = $user->employee?->branch;
+
                 return [
                     'id' => $user->id,
                     'name' => $user->name ?? $user->user_name,
                     'email' => $user->email,
                     'role' => $user->role ?? 'staff',
                     'profile_picture' => $user->employee?->profile_picture,
+                    'branch' => $branch ? [
+                        'id' => $branch->id,
+                        'name' => $branch->name,
+                        'location' => $branch->location,
+                        'manager' => $branch->manager,
+                        'status' => $branch->status,
+                    ] : null,
                     'is_active' => (bool) ($user->is_active ?? true),
                     'is_online' => (bool) ($user->is_online ?? false),
                     'created_at' => $user->created_at,
@@ -41,6 +50,7 @@ class UserController extends Controller
             'email' => ['required', 'email', 'max:255', 'unique:users,email'],
             'password' => ['required', 'string', 'min:8'],
             'role' => ['required', 'string', 'max:50'],
+            'branch_id' => ['nullable', 'integer', 'exists:branches,id'],
             'profile_picture' => ['nullable', 'image', 'max:4096'],
         ]);
 
@@ -72,20 +82,27 @@ class UserController extends Controller
                 $profilePictureUrl = Storage::url($path);
             }
 
-            $employee = Employee::create([
+            $employeeData = [
                 'first_name' => $validated['name'],
                 'last_name' => null,
                 'contact_number' => (int) substr($seed, -9),
                 'contact_email' => $validated['email'],
                 'address' => 'N/A-' . $seed,
                 'profile_picture' => $profilePictureUrl,
-            ]);
+            ];
+
+            if (Schema::hasColumn('employees', 'branch_id') && !empty($validated['branch_id'])) {
+                $employeeData['branch_id'] = $validated['branch_id'];
+            }
+
+            $employee = Employee::create($employeeData);
 
             $attributes['employee_id'] = $employee->id;
         }
 
         $user = User::create($attributes);
-    $user->load('employee');
+        $user->load('employee.branch');
+        $branch = $user->employee?->branch;
 
         return response()->json([
             'message' => 'User created successfully.',
@@ -95,6 +112,13 @@ class UserController extends Controller
                 'email' => $user->email,
                 'role' => $user->role ?? 'staff',
                 'profile_picture' => $user->employee?->profile_picture,
+                'branch' => $branch ? [
+                    'id' => $branch->id,
+                    'name' => $branch->name,
+                    'location' => $branch->location,
+                    'manager' => $branch->manager,
+                    'status' => $branch->status,
+                ] : null,
                 'is_active' => (bool) ($user->is_active ?? true),
                 'is_online' => (bool) ($user->is_online ?? false),
                 'created_at' => $user->created_at,
